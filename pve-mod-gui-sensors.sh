@@ -141,24 +141,35 @@ function read_apcctrl_status() {
 		return 1
 	fi
 
-	# Parse a simple key:value format produced by 'apcaccess status' saved as-is
+	# Parse key: value lines produced by 'apcaccess status' saved as-is
 	local model status linev battchg timeleft
 	while IFS= read -r line; do
+		# Skip lines without ':'
 		case "$line" in
-			MODEL\ :*)
-				model="${line#MODEL  : }"
+			*:* ) ;;
+			* ) continue ;;
+		esac
+
+		# Extract key and value, trimming spaces
+		local key val
+		key=$(printf '%s' "$line" | cut -d: -f1 | xargs)
+		val=$(printf '%s' "$line" | cut -d: -f2- | xargs)
+
+		case "$key" in
+			MODEL)
+				model="$val"
 				;;
-			STATUS\ :*)
-				status="${line#STATUS : }"
+			STATUS)
+				status="$val"
 				;;
-			LINEV\ :*)
-				linev="${line#LINEV  : }"
+			LINEV)
+				linev="$val"
 				;;
-			BCHARGE\ :*)
-				battchg="${line#BCHARGE: }"
+			BCHARGE)
+				battchg="$val"
 				;;
-			TIMELEFT\ :*)
-				timeleft="${line#TIMELEFT: }"
+			TIMELEFT)
+				timeleft="$val"
 				;;
 		esac
 	done < "$file_path"
