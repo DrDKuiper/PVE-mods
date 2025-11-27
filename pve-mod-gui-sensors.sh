@@ -36,9 +36,12 @@ SCRIPT_CWD="$(dirname "$(readlink -f "$0")")"
 JSON_EXPORT_DIRECTORY="$SCRIPT_CWD"
 JSON_EXPORT_FILENAME="sensorsdata.json"
 
-# Optional APCCTRL integration: when enabled, UPS data is read from a JSON file
+# Optional APCCTRL integration: when enabled, UPS data is read from a status file
 # generated externally (e.g. from `apcaccess status`).
 APCCTRL_STATUS_FILE="/var/lib/pve-mods/apcctrl-status.json"
+
+# Tracks which UPS backend was chosen during configure(): "nut" or "apcctrl"
+UPS_BACKEND=""
 
 # File paths
 PVE_MANAGER_LIB_JS_FILE="/usr/share/pve-manager/js/pvemanagerlib.js"
@@ -185,6 +188,7 @@ function read_apcctrl_status() {
 	APCCTRL_LINEV="$linev"
 	APCCTRL_BCHARGE="$battchg"
 	APCCTRL_TIMELEFT="$timeleft"
+	UPS_BACKEND="apcctrl"
 	ENABLE_UPS=true
 	info "Using APCCTRL UPS data from '$file_path' (model: $APCCTRL_MODEL)."
 	return 0
@@ -386,6 +390,7 @@ function configure {
 						read_apcctrl_status || ENABLE_UPS=false
 						;;
 					1|"" )
+					UPS_BACKEND="nut"
 						# Ensure nut-client (upsc) is available before asking for connection
 						ensure_package_installed "nut-client" "Network UPS Tools client (upsc)" "upsc"
 
@@ -628,27 +633,59 @@ collect_sensors_output() {
 # Collect UPS data
 collect_ups_output() {
     local output_file="$1"
-    local ups_cmd
 
-    if [[ $DEBUG_REMOTE == true ]]; then
-        ups_cmd="cat \"$DEBUG_UPS_FILE\""
-    else
-        ups_cmd="upsc \"$upsConnection\" 2>/dev/null"
-    fi
+	# region ups heredoc
+	if [[ "$UPS_BACKEND" == "apcctrl" ]]; then
+		# APCCTRL backend: read pre-parsed summary from APCCTRL_STATUS_FILE
+		# We only expose a small structured hash to the frontend.
+		sed -i "/my \$dinfo = df('\\/'', 1);/i\\
+			# Collect UPS status information from APCCTRL status file\\
+			my \\$apcfile = '$APCCTRL_STATUS_FILE';\\
+			if (-f \\$apcfile) {\\
+				my %ups;\\
+				open(my \\$fh, '<', \\$apcfile);\\
+				while (my \\$line = <\\$fh>) {\\
+					chomp \\$line;\\
+					next unless \\$line =~ /:/;\\
+					my (
+						$\key,$\val
+					) = split(/:/, \\$line, 2);\\
+					$\key =~ s/^\\s+|\\s+
+					//g;\\
+					$\val =~ s/^\\s+|\\s+
+					//g;\\
+					if ($\key eq 'MODEL') { \\$ups{model} = $\val; }\\
+					elsif ($\key eq 'STATUS') { \\$ups{status} = $\val; }\\
+					elsif ($\key eq 'LINEV') { \\$ups{linev} = $\val; }\\
+					elsif ($\key eq 'BCHARGE') { \\$ups{bcharge} = $\val; }\\
+					elsif ($\key eq 'TIMELEFT') { \\$ups{timeleft} = $\val; }\\
+				}\\
+				close(\\$fh);\\
+				\\$res->{upsc} = \\%ups;\\
+			}\\
+		" "$NODES_PM_FILE"
+	else
+		local ups_cmd
 
-    # region ups heredoc
-    sed -i "/my \$dinfo = df('\/', 1);/i\\
-		# Collect UPS status information\\
-		sub get_upsc {\\
-			my \$cmd = '$ups_cmd';\\
-			my \$output = \`\\\$cmd\`;\\
-			return \$output;\\
-		}\\
-		\$res->{upsc} = get_upsc();\\
-" "$NODES_PM_FILE"
-    # endregion ups heredoc
+		if [[ $DEBUG_REMOTE == true ]]; then
+			ups_cmd="cat \"$DEBUG_UPS_FILE\""
+		else
+			ups_cmd="upsc \"$upsConnection\" 2>/dev/null"
+		fi
 
-    info "UPS retriever added to \"$output_file\"."
+		sed -i "/my \$dinfo = df('\\/'', 1);/i\\
+			# Collect UPS status information\\
+			sub get_upsc {\\
+				my \\$cmd = '$ups_cmd';\\
+				my \\$output = \`\\$cmd\`;\\
+				return \\$output;\\
+			}\\
+			\\$res->{upsc} = get_upsc();\\
+		" "$NODES_PM_FILE"
+	fi
+	# endregion ups heredoc
+
+	info "UPS retriever added to \"$output_file\" (backend: ${UPS_BACKEND:-unknown})."
 }
 
 
@@ -1454,7 +1491,7 @@ generate_ups_widget() {
 			renderer: function(value) {
 				let objValue = {};
 				try {
-					// Parse the UPS data
+					// Backend 1: NUT (string with key: value per line)
 					if (typeof value === 'string') {
 						const lines = value.split('\n');
 						lines.forEach(line => {
@@ -1465,7 +1502,8 @@ generate_ups_widget() {
 								objValue[key] = val;
 							}
 						});
-					} else if (typeof value === 'object') {
+					} else if (typeof value === 'object' && value !== null) {
+						// Backend 2: APCCTRL (already structured hash from server)
 						objValue = value || {};
 					}
 				} catch(e) {
@@ -1513,18 +1551,38 @@ generate_ups_widget() {
 					return `${mins}m ${secs}s`;
 				}
 
-				// Extract key UPS information
-				const batteryCharge = objValue['battery.charge'];
-				const batteryRuntime = objValue['battery.runtime'];
-				const inputVoltage = objValue['input.voltage'];
-				const upsLoad = objValue['ups.load'];
-				const upsStatus = objValue['ups.status'];
-				const upsModel = objValue['ups.model'] || objValue['device.model'];
-				const testResult = objValue['ups.test.result'];
-				const batteryChargeLow = objValue['battery.charge.low'];
-				const batteryRuntimeLow = objValue['battery.runtime.low'];
-				const upsRealPowerNominal = objValue['ups.realpower.nominal'];
-				const batteryMfrDate = objValue['battery.mfr.date'];
+				// Detect backend based on available keys
+				const isNutBackend = Object.keys(objValue).some(k => k.indexOf('battery.charge') === 0 || k.indexOf('ups.model') === 0 || k.indexOf('device.model') === 0);
+				let batteryCharge, batteryRuntime, inputVoltage, upsLoad, upsStatus, upsModel, testResult, batteryChargeLow, batteryRuntimeLow, upsRealPowerNominal, batteryMfrDate;
+
+				if (isNutBackend) {
+					// NUT-style keys
+					batteryCharge = objValue['battery.charge'];
+					batteryRuntime = objValue['battery.runtime'];
+					inputVoltage = objValue['input.voltage'];
+					upsLoad = objValue['ups.load'];
+					upsStatus = objValue['ups.status'];
+					upsModel = objValue['ups.model'] || objValue['device.model'];
+					testResult = objValue['ups.test.result'];
+					batteryChargeLow = objValue['battery.charge.low'];
+					batteryRuntimeLow = objValue['battery.runtime.low'];
+					upsRealPowerNominal = objValue['ups.realpower.nominal'];
+					batteryMfrDate = objValue['battery.mfr.date'];
+				} else {
+					// APCCTRL backend: compact keys from status file
+					batteryCharge = objValue['bcharge'];
+					batteryRuntime = objValue['timeleft'];
+					inputVoltage = objValue['linev'];
+					upsLoad = null; // not available from our minimal APCCTRL mapping
+					upsStatus = objValue['status'];
+					upsModel = objValue['model'];
+					// Other fields not currently provided by APCCTRL mapping
+					batteryChargeLow = null;
+					batteryRuntimeLow = null;
+					upsRealPowerNominal = null;
+					batteryMfrDate = null;
+					testResult = null;
+				}
 
 				// Build the status display
 				let displayItems = [];
