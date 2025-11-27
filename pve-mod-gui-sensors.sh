@@ -87,34 +87,46 @@ function check_root_privileges() {
 	info "Root privileges verified."
 }
 
-# Define a function to install packages
-function install_packages {
-	# Check if the 'sensors' command is available on the system
-	if (! command -v sensors &>/dev/null); then
-		# If the 'sensors' command is not available, prompt the user to install lm-sensors
-		local choiceInstallLmSensors=$(ask "lm-sensors is not installed. Would you like to install it? (y/n)")
-		case "$choiceInstallLmSensors" in
-			[yY])
-				# If the user chooses to install lm-sensors, update the package list and install the package
-				apt-get update
-				apt-get install lm-sensors
-				;;
-			[nN])
-				# If the user chooses not to install lm-sensors, exit the script with a zero status code
-				msgb "Decided to not install lm-sensors. The mod cannot run without it. Exiting..."
-				err "lm-sensors is required. Exiting..."
-				;;
-			*)
-				# If the user enters an invalid input, print an error message and exit the script with a non-zero status code
-				err "Invalid input. Exiting..."
-				;;
-		esac
+function ensure_package_installed() {
+	local pkg_name="$1"
+	local human_name="$2"
+	local bin_name="$3" # optional: binary to check, falls back to pkg_name if empty
+
+	local bin_to_check
+	if [[ -n "${bin_name}" ]]; then
+		bin_to_check="${bin_name}"
+	else
+		bin_to_check="${pkg_name}"
 	fi
 
-	# Check if lm-sensors is installed correctly and exit if not
-	if (! command -v sensors &>/dev/null); then
-		err "lm-sensors installation failed or 'sensors' command is not available. Please install lm-sensors manually and re-run the script."
+	if command -v "${bin_to_check}" &>/dev/null; then
+		return 0
 	fi
+
+	local choice
+	choice=$(ask "${human_name} is not installed. Would you like to install package '${pkg_name}' now? (y/n)")
+	case "${choice}" in
+		[yY])
+			apt-get update && apt-get install -y "${pkg_name}" || err "Failed to install package '${pkg_name}'. Please install it manually and re-run the script."
+			;;
+		[nN])
+			msgb "Decided to not install ${human_name}. Required functionality will be unavailable. Exiting..."
+			err "Missing required dependency: ${human_name}. Exiting..."
+			;;
+		*)
+			err "Invalid input. Exiting..."
+			;;
+	esac
+
+	if ! command -v "${bin_to_check}" &>/dev/null; then
+		err "${human_name} installation failed or '${bin_to_check}' command is not available. Please install it manually and re-run the script."
+	fi
+}
+
+# Define a function to install required packages for sensors
+function install_packages {
+	# Ensure lm-sensors is available
+	ensure_package_installed "lm-sensors" "lm-sensors" "sensors"
 }
 
 function configure {
@@ -299,31 +311,33 @@ function configure {
     fi
 	#endregion temp unit setup
 
-    #### UPS ####
+	#### UPS ####
 	#region ups setup
     local choiceUPS=$(ask "Enable UPS information? (y/N)")
     case "$choiceUPS" in
         [yY])
+				# Ensure nut-client (upsc) is available before asking for connection
+				ensure_package_installed "nut-client" "Network UPS Tools client (upsc)" "upsc"
+
             if [ "$DEBUG_REMOTE" = true ]; then
                 upsOutput=$(cat "$DEBUG_UPS_FILE")
                 info "Remote debugging: UPS readings from $DEBUG_UPS_FILE"
                 upsConnection="DEBUG_UPS"
             else
-                upsConnection=$(ask "Enter UPS connection (e.g., upsname[@hostname[:port]])")
-                if ! command -v upsc &>/dev/null; then
-                    err "The 'upsc' command is not available. Install 'nut-client'."
-                fi
-                upsOutput=$(upsc "$upsConnection" 2>&1)
+				info "Example UPS connections: 'ups@localhost', 'apc@192.168.1.10'. Ensure your UPS (including APC/APCCTRL models) is configured in /etc/nut/ups.conf and tested with 'upsc'."
+				upsConnection=$(ask "Enter UPS connection (e.g., ups@localhost or apc@192.168.1.10) ")
+				upsOutput=$(upsc "$upsConnection" 2>&1)
             fi
 
-            if echo "$upsOutput" | grep -q "device.model:"; then
-                modelName=$(echo "$upsOutput" | grep "device.model:" | cut -d':' -f2- | xargs)
-                ENABLE_UPS=true
-                info "Connected to UPS model: $modelName at $upsConnection."
-            else
-                warn "Failed to connect to UPS at '$upsConnection'."
-                ENABLE_UPS=false
-            fi
+	        if echo "$upsOutput" | grep -q "device.model:"; then
+	            modelName=$(echo "$upsOutput" | grep "device.model:" | cut -d':' -f2- | xargs)
+	            ENABLE_UPS=true
+	            info "Connected to UPS: $modelName ($upsConnection)."
+	        else
+	            warn "Failed to connect to UPS at '$upsConnection'. Output was:"
+	            echo "$upsOutput"
+	            ENABLE_UPS=false
+	        fi
             ;;
         [nN]|"")
             ENABLE_UPS=false
