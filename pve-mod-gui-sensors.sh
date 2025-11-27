@@ -36,6 +36,10 @@ SCRIPT_CWD="$(dirname "$(readlink -f "$0")")"
 JSON_EXPORT_DIRECTORY="$SCRIPT_CWD"
 JSON_EXPORT_FILENAME="sensorsdata.json"
 
+# Optional APCCTRL integration: when enabled, UPS data is read from a JSON file
+# generated externally (e.g. from `apcaccess status`).
+APCCTRL_STATUS_FILE="/var/lib/pve-mods/apcctrl-status.json"
+
 # File paths
 PVE_MANAGER_LIB_JS_FILE="/usr/share/pve-manager/js/pvemanagerlib.js"
 NODES_PM_FILE="/usr/share/perl5/PVE/API2/Nodes.pm"
@@ -127,6 +131,52 @@ function ensure_package_installed() {
 function install_packages {
 	# Ensure lm-sensors is available
 	ensure_package_installed "lm-sensors" "lm-sensors" "sensors"
+}
+
+function read_apcctrl_status() {
+	local file_path="$APCCTRL_STATUS_FILE"
+	if [ ! -f "$file_path" ]; then
+		warn "APCCTRL UPS mode is enabled but status file '$file_path' was not found. UPS information will not be displayed."
+		ENABLE_UPS=false
+		return 1
+	fi
+
+	# Parse a simple key:value format produced by 'apcaccess status' saved as-is
+	local model status linev battchg timeleft
+	while IFS= read -r line; do
+		case "$line" in
+			MODEL\ :*)
+				model="${line#MODEL  : }"
+				;;
+			STATUS\ :*)
+				status="${line#STATUS : }"
+				;;
+			LINEV\ :*)
+				linev="${line#LINEV  : }"
+				;;
+			BCHARGE\ :*)
+				battchg="${line#BCHARGE: }"
+				;;
+			TIMELEFT\ :*)
+				timeleft="${line#TIMELEFT: }"
+				;;
+		esac
+	done < "$file_path"
+
+	if [ -z "$model" ]; then
+		warn "APCCTRL status file '$file_path' does not contain expected fields (MODEL, STATUS, LINEV, BCHARGE, TIMELEFT). UPS information will not be displayed."
+		ENABLE_UPS=false
+		return 1
+	fi
+
+	APCCTRL_MODEL="$model"
+	APCCTRL_STATUS="$status"
+	APCCTRL_LINEV="$linev"
+	APCCTRL_BCHARGE="$battchg"
+	APCCTRL_TIMELEFT="$timeleft"
+	ENABLE_UPS=true
+	info "Using APCCTRL UPS data from '$file_path' (model: $APCCTRL_MODEL)."
+	return 0
 }
 
 function configure {
@@ -313,54 +363,68 @@ function configure {
 
 	#### UPS ####
 	#region ups setup
-    local choiceUPS=$(ask "Enable UPS information? (y/N)")
-    case "$choiceUPS" in
-        [yY])
-				# Ensure nut-client (upsc) is available before asking for connection
-				ensure_package_installed "nut-client" "Network UPS Tools client (upsc)" "upsc"
+	    local choiceUPS=$(ask "Enable UPS information? (y/N)")
+	    case "$choiceUPS" in
+	        [yY])
+				# Ask which backend to use for UPS data
+				local upsBackend
+				upsBackend=$(ask "Select UPS backend: [1] NUT (upsc) [2] APCCTRL (apcaccess) (1/2)")
+				case "$upsBackend" in
+					2)
+						info "Using APCCTRL integration. Ensure 'apcaccess status > $APCCTRL_STATUS_FILE' is run periodically."
+						read_apcctrl_status || ENABLE_UPS=false
+						;;
+					1|"" )
+						# Ensure nut-client (upsc) is available before asking for connection
+						ensure_package_installed "nut-client" "Network UPS Tools client (upsc)" "upsc"
 
-            if [ "$DEBUG_REMOTE" = true ]; then
-                upsOutput=$(cat "$DEBUG_UPS_FILE")
-                info "Remote debugging: UPS readings from $DEBUG_UPS_FILE"
-                upsConnection="DEBUG_UPS"
-            else
-				# Try to list known UPS names to help the user
-				local knownUPS
-				knownUPS=$(upsc -l 2>/dev/null || true)
-				if [ -n "$knownUPS" ]; then
-					info "Detected UPS definitions from NUT (use one of these names in <name>@host):"
-					echo "$knownUPS"
-				fi
+						if [ "$DEBUG_REMOTE" = true ]; then
+							upsOutput=$(cat "$DEBUG_UPS_FILE")
+							info "Remote debugging: UPS readings from $DEBUG_UPS_FILE"
+							upsConnection="DEBUG_UPS"
+						else
+							# Try to list known UPS names to help the user
+							local knownUPS
+							knownUPS=$(upsc -l 2>/dev/null || true)
+							if [ -n "$knownUPS" ]; then
+								info "Detected UPS definitions from NUT (use one of these names in <name>@host):"
+								echo "$knownUPS"
+							fi
 
-				info "Example UPS connections: 'ups@localhost', 'apc@192.168.1.10'. Ensure your UPS (including APC/APCCTRL models) is configured in /etc/nut/ups.conf and tested with 'upsc'."
-				upsConnection=$(ask "Enter UPS connection (e.g., ups@localhost or apc@192.168.1.10). Leave empty to disable UPS display ")
-				if [ -z "$upsConnection" ]; then
-					warn "No UPS connection provided. UPS information will NOT be displayed."
-					ENABLE_UPS=false
-					break
-				fi
-				upsOutput=$(upsc "$upsConnection" 2>&1)
-            fi
-
-	        if echo "$upsOutput" | grep -q "device.model:"; then
-	            modelName=$(echo "$upsOutput" | grep "device.model:" | cut -d':' -f2- | xargs)
-	            ENABLE_UPS=true
-	            info "Connected to UPS: $modelName ($upsConnection)."
-	        else
-	            warn "Failed to connect to UPS at '$upsConnection'. Output was:"
-	            echo "$upsOutput"
+							info "Example UPS connections: 'ups@localhost', 'apc@192.168.1.10'. Ensure your UPS (including APC/APCCTRL models) is configured in /etc/nut/ups.conf and tested with 'upsc'."
+							upsConnection=$(ask "Enter UPS connection (e.g., ups@localhost or apc@192.168.1.10). Leave empty to disable UPS display ")
+							if [ -z "$upsConnection" ]; then
+								warn "No UPS connection provided. UPS information will NOT be displayed."
+								ENABLE_UPS=false
+							else
+								upsOutput=$(upsc "$upsConnection" 2>&1)
+								if echo "$upsOutput" | grep -q "device.model:"; then
+									modelName=$(echo "$upsOutput" | grep "device.model:" | cut -d':' -f2- | xargs)
+									ENABLE_UPS=true
+									info "Connected to UPS: $modelName ($upsConnection)."
+								else
+									warn "Failed to connect to UPS at '$upsConnection'. Output was:"
+									echo "$upsOutput"
+									ENABLE_UPS=false
+								fi
+							fi
+						fi
+						;;
+					*)
+						warn "Invalid UPS backend selection. UPS info will not be displayed."
+						ENABLE_UPS=false
+						;;
+				esac
+	            ;;
+	        [nN]|"")
 	            ENABLE_UPS=false
-	        fi
-            ;;
-        [nN]|"")
-            ENABLE_UPS=false
-            info "UPS information will not be displayed."
-            ;;
-        *)
-            warn "Invalid selection. UPS info will not be displayed."
-            ENABLE_UPS=false
-            ;;
-    esac
+	            info "UPS information will not be displayed."
+	            ;;
+	        *)
+	            warn "Invalid selection. UPS info will not be displayed."
+	            ENABLE_UPS=false
+	            ;;
+	    esac
 	#endregion ups setup
 
     #### System Info ####

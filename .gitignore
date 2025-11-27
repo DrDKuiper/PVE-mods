@@ -1,4 +1,35 @@
-﻿################################################################################
+﻿# Ignore build artifacts and generated files from bundled APCCTRL sources
+apcctrl/Makefile
+apcctrl/Makefile.in
+apcctrl/config.log
+apcctrl/config.status
+apcctrl/autom4te.cache/
+apcctrl/aclocal.m4
+apcctrl/libtool
+apcctrl/stamp-h1
+apcctrl/src/.deps/
+apcctrl/src/.libs/
+apcctrl/src/*.o
+apcctrl/src/*.lo
+apcctrl/src/apcaccess
+apcctrl/src/apcctrl
+apcctrl/src/apctest
+apcctrl/src/lib/.deps/
+apcctrl/src/lib/.libs/
+apcctrl/src/lib/*.o
+apcctrl/src/lib/*.lo
+apcctrl/platforms/*/apcctrl
+apcctrl/platforms/*/apctest
+apcctrl/platforms/*/apcaccess
+apcctrl/platforms/*/apcctrl.conf
+apcctrl/platforms/*/config.log
+
+# Generic backup and temporary files
+*.swp
+*.swo
+*~
+*.tmp
+################################################################################
 # This .gitignore file was automatically created by Microsoft(R) Visual Studio.
 ################################################################################
 
