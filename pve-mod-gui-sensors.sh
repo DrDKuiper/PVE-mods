@@ -145,7 +145,7 @@ function read_apcctrl_status() {
 	fi
 
 	# Parse key: value lines produced by 'apcaccess status' saved as-is
-	local model status linev battchg timeleft
+	local model status linev battchg timeleft loadpct outputv linefreq battv mbattchg mintimel nompower
 	while IFS= read -r line; do
 		# Skip lines without ':'
 		case "$line" in
@@ -166,13 +166,44 @@ function read_apcctrl_status() {
 				status="$val"
 				;;
 			LINEV)
-				linev="$val"
+				# Expect values like "121.6 Volts" - keep numeric part only
+				linev="${val%% *}"
 				;;
 			BCHARGE)
-				battchg="$val"
+				# Expect values like "100.0 Percent" - keep numeric part only
+				battchg="${val%% *}"
 				;;
 			TIMELEFT)
-				timeleft="$val"
+				# Expect values like "13.7 Minutes" - keep numeric part only
+				timeleft="${val%% *}"
+				;;
+			LOADPCT)
+				# Expect values like "19.0 Percent" - keep numeric part only
+				loadpct="${val%% *}"
+				;;
+			OUTPUTV)
+				# Expect values like "124.0 Volts" - keep numeric part only
+				outputv="${val%% *}"
+				;;
+			LINEFREQ)
+				# Expect values like "59.0 Hz" - keep numeric part only
+				linefreq="${val%% *}"
+				;;
+			BATTV)
+				# Expect values like "26.6 Volts" - keep numeric part only
+				battv="${val%% *}"
+				;;
+			MBATTCHG)
+				# Expect values like "80 Percent" - keep numeric part only
+				mbattchg="${val%% *}"
+				;;
+			MINTIMEL)
+				# Expect values like "20 Minutes" - keep numeric part only
+				mintimel="${val%% *}"
+				;;
+			NOMPOWER)
+				# Expect values like "825 Watts" - keep numeric part only
+				nompower="${val%% *}"
 				;;
 		esac
 	done < "$file_path"
@@ -188,6 +219,13 @@ function read_apcctrl_status() {
 	APCCTRL_LINEV="$linev"
 	APCCTRL_BCHARGE="$battchg"
 	APCCTRL_TIMELEFT="$timeleft"
+	APCCTRL_LOADPCT="$loadpct"
+	APCCTRL_OUTPUTV="$outputv"
+	APCCTRL_LINEFREQ="$linefreq"
+	APCCTRL_BATTV="$battv"
+	APCCTRL_MBATTCHG="$mbattchg"
+	APCCTRL_MINTIMEL="$mintimel"
+	APCCTRL_NOMPOWER="$nompower"
 	UPS_BACKEND="apcctrl"
 	ENABLE_UPS=true
 	info "Using APCCTRL UPS data from '$file_path' (model: $APCCTRL_MODEL)."
@@ -1547,7 +1585,7 @@ generate_ups_widget() {
 				function formatRuntime(seconds) {
 					if (!seconds || isNaN(seconds)) return 'N/A';
 					const mins = Math.floor(seconds / 60);
-					const secs = seconds % 60;
+					const secs = Math.floor(seconds % 60);
 					return `${mins}m ${secs}s`;
 				}
 
@@ -1570,16 +1608,16 @@ generate_ups_widget() {
 					batteryMfrDate = objValue['battery.mfr.date'];
 				} else {
 					// APCCTRL backend: compact keys from status file
-					batteryCharge = objValue['bcharge'];
-					batteryRuntime = objValue['timeleft'];
-					inputVoltage = objValue['linev'];
-					upsLoad = null; // not available from our minimal APCCTRL mapping
+					batteryCharge = objValue['bcharge']; // already numeric percentage
+					batteryRuntime = objValue['timeleft']; // numeric minutes
+					inputVoltage = objValue['linev']; // numeric volts
+					upsLoad = objValue['loadpct']; // numeric percentage if available
 					upsStatus = objValue['status'];
 					upsModel = objValue['model'];
-					// Other fields not currently provided by APCCTRL mapping
-					batteryChargeLow = null;
-					batteryRuntimeLow = null;
-					upsRealPowerNominal = null;
+					// Additional APCCTRL fields
+					batteryChargeLow = objValue['mbattchg'] || null; // minimum battery charge percent
+					batteryRuntimeLow = objValue['mintimel'] ? (parseFloat(objValue['mintimel']) * 60) : null; // minutes -> seconds
+					upsRealPowerNominal = objValue['nompower'] || null; // watts
 					batteryMfrDate = null;
 					testResult = null;
 				}
@@ -1648,13 +1686,18 @@ generate_ups_widget() {
 				// Runtime
 				if (statusLine) statusLine += ' | ';
 				if (batteryRuntime) {
-					const runtime = parseInt(batteryRuntime);
+					// NUT uses seconds, APCCTRL mapping uses minutes
+					let runtimeSeconds = parseFloat(batteryRuntime);
+					if (!isNutBackend) {
+						// convert minutes to seconds for APCCTRL backend
+						runtimeSeconds = runtimeSeconds * 60;
+					}
 					const runtimeLowThreshold = batteryRuntimeLow ? parseInt(batteryRuntimeLow) : 600;
 					let runtimeColor = null;
-					if (runtime <= runtimeLowThreshold / 2) runtimeColor = '#d9534f'; // Red if less than half of low threshold
-					else if (runtime <= runtimeLowThreshold) runtimeColor = '#f0ad4e'; // Orange if at low threshold
+					if (runtimeSeconds <= runtimeLowThreshold / 2) runtimeColor = '#d9534f'; // Red if less than half of low threshold
+					else if (runtimeSeconds <= runtimeLowThreshold) runtimeColor = '#f0ad4e'; // Orange if at low threshold
 					let runtimeStyle = runtimeColor ? ('color: ' + runtimeColor + ';') : '';
-					statusLine += 'Runtime: <span style="' + runtimeStyle + '">' + formatRuntime(runtime) + '</span>';
+					statusLine += 'Runtime: <span style="' + runtimeStyle + '">' + formatRuntime(runtimeSeconds) + '</span>';
 				} else {
 					statusLine += 'Runtime: <span>N/A</span>';
 				}
