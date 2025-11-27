@@ -324,8 +324,21 @@ function configure {
                 info "Remote debugging: UPS readings from $DEBUG_UPS_FILE"
                 upsConnection="DEBUG_UPS"
             else
+				# Try to list known UPS names to help the user
+				local knownUPS
+				knownUPS=$(upsc -l 2>/dev/null || true)
+				if [ -n "$knownUPS" ]; then
+					info "Detected UPS definitions from NUT (use one of these names in <name>@host):"
+					echo "$knownUPS"
+				fi
+
 				info "Example UPS connections: 'ups@localhost', 'apc@192.168.1.10'. Ensure your UPS (including APC/APCCTRL models) is configured in /etc/nut/ups.conf and tested with 'upsc'."
-				upsConnection=$(ask "Enter UPS connection (e.g., ups@localhost or apc@192.168.1.10) ")
+				upsConnection=$(ask "Enter UPS connection (e.g., ups@localhost or apc@192.168.1.10). Leave empty to disable UPS display ")
+				if [ -z "$upsConnection" ]; then
+					warn "No UPS connection provided. UPS information will NOT be displayed."
+					ENABLE_UPS=false
+					break
+				fi
 				upsOutput=$(upsc "$upsConnection" 2>&1)
             fi
 
