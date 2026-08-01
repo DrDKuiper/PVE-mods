@@ -84,12 +84,18 @@ PERL_SNIP
 echo "Inserting APCCTRL snippet into $NODES_FILE"
 
 # Insert snippet before the first 'return $res;' after the rootfs block
+# NOTE: uses index()/plain string compares instead of \s and \{\} regex
+# escapes, since those are gawk-only extensions and silently fail to match
+# under mawk (the default /usr/bin/awk on Debian/Proxmox).
 awk -v snipfile="$SNIP" '
   BEGIN { inserted = 0; rootfs_seen = 0; while ((getline line < snipfile) > 0) { snip = snip line "\n" } close(snipfile) }
   {
     print $0
-    if ($0 ~ /\$res\s*->\{rootfs\}/) { rootfs_seen = 1 }
-    if (rootfs_seen && $0 ~ /^\s*return\s+\$res\s*;\s*$/ && !inserted) {
+    if (index($0, "$res->{rootfs}") > 0) { rootfs_seen = 1 }
+    trimmed = $0
+    gsub(/^[ \t]+/, "", trimmed)
+    gsub(/[ \t]+$/, "", trimmed)
+    if (rootfs_seen && trimmed == "return $res;" && !inserted) {
       print snip
       inserted = 1
     }
